@@ -1,0 +1,81 @@
+name: iOS unsigned IPA
+
+# 在 GitHub 的 macOS runner 上做「无签名」构建，产出可直接用 Sideloadly 重新签名的 .ipa。
+# 免费 Apple ID 就能装（7 天重签），全程不需要本地 Mac / Xcode / 开发者账号。
+#
+# 触发方式：Actions → 左侧 “iOS unsigned IPA” → Run workflow（或 push 改动到 ios/ 时自动跑）
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "ios/**"
+      - "prompts/**"
+      - ".github/workflows/ios-unsigned-ipa.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  build-ipa:
+    # macos-26 自带 Xcode 26（仓库自带 CI 也用这个镜像）。
+    # 若你的仓库/账号不支持该镜像，改成 macos-latest 或 macos-15 即可。
+    runs-on: macos-26
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: ios
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Show toolchain
+        run: |
+          xcodebuild -version
+          echo "--- SDK ---"
+          xcodebuild -showsdks | grep -i iphoneos || true
+
+      - name: Build (unsigned, device)
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project IPhoneAgent.xcodeproj \
+            -scheme IPhoneAgent \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath "$RUNNER_TEMP/dd" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGN_ENTITLEMENTS="" \
+            PROVISIONING_PROFILE_SPECIFIER="" \
+            build
+
+      - name: Package unsigned IPA
+        run: |
+          APP="$RUNNER_TEMP/dd/Build/Products/Release-iphoneos/IPhoneAgent.app"
+          if [ ! -d "$APP" ]; then echo "::error::找不到 .app，请看上面的构建日志"; exit 1; fi
+
+          # 记录关键信息，便于排查
+          /usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$APP/Info.plist" || true
+          /usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$APP/Info.plist" || true
+          echo "--- 内嵌扩展 ---"
+          ls "$APP/PlugIns" || true
+
+          rm -rf dist && mkdir -p dist/Payload
+          cp -R "$APP" dist/Payload/
+          cd dist
+          zip -qry "ESP32Agent-unsigned.ipa" Payload
+          ls -lh ESP32Agent-unsigned.ipa
+          echo "--- ipa 内容（前 20 行）---"
+          unzip -l ESP32Agent-unsigned.ipa | head -20
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ESP32Agent-unsigned-ipa
+          path: ios/dist/ESP32Agent-unsigned.ipa
+          if-no-files-found: error
+          retention-days: 30
